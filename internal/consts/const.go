@@ -5,3 +5,5 @@ const LOGIN = "/auth/login"
 const REGISTER = "/auth/register"
 
 const VALIDATE = "/auth/validate"
+
+const VERIFY = "/verify"
