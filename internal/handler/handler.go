@@ -20,41 +20,47 @@ type AuthHandler struct {
 	secret       string
 	clientRedis  *storage.ClientRedis
 	sender       *email.Sender
-	timeDuration int
+	timeDurRedis int
 	protocol     string
 	server       string
 	port         string
+	timeDurJWT   int
 }
 
 func NewAuthHandler(log logger.Logger, db *sql.DB, clientRedis *storage.ClientRedis,
-	sender *email.Sender, timeDuration int, protocol, server, secret, port string) *AuthHandler {
+	sender *email.Sender, timeDurRedis, timeDurJWT int, protocol, server, secret, port string) *AuthHandler {
 	return &AuthHandler{
 		log:          log,
 		db:           db,
 		secret:       secret,
 		clientRedis:  clientRedis,
 		sender:       sender,
-		timeDuration: timeDuration,
+		timeDurRedis: timeDurRedis,
 		protocol:     protocol,
 		server:       server,
 		port:         port,
+		timeDurJWT:   timeDurJWT,
 	}
 }
 
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	var (
 		err   error
-		body  []byte
 		uuid  string
 		exist int64
 		user  *model.User
 		link  string
+		ok    bool
 	)
-	/*получаем json запроса, его будем использовать для записи в бд
-	в случае подтверждения почты, а как временное хранилище данных используем
-	Redis, в качестве ключа будет использоваться uuid*/
+	/*
+		Получаем json запроса, его будем использовать для записи в бд
+		используем Redis для хранения почты по ключу верификации
+		для изменения статуса пользователя на верифицированного
+	*/
 
-	//получаем body запроса
+	/*
+		Получаем body запроса
+	*/
 	err = json.NewDecoder(r.Body).Decode(&user)
 
 	//закрываем чтение тела запроса
@@ -65,16 +71,20 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//сразу хешируем пароль пользователя!
-	user.Password, err = security.CryptoHash(user.Password)
-	if err != nil {
-		h.log.Error("crypho hash err: ", err.Error())
-		w.WriteHeader(http.StatusInternalServerError)
+	/*
+		Проверяем наличие пользователя с указанным email
+	*/
+	if storage.CheckUser(user.Email, h.db, h.log) {
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	body, err = json.Marshal(user)
+	/*
+		Сразу хешируем пароль пользователя!
+	*/
+	user.Password, err = security.CryptoHash(user.Password)
 	if err != nil {
+		h.log.Error("crypho hash err: ", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -91,17 +101,31 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		}
 
 	}
-	/*записываем в redis
-	uuid => body request json
-	timeDuration - время на подтверждение почты*/
-	h.clientRedis.Set(uuid, body, h.timeDuration)
+	/*
+		записываем в redis
+		uuid token => email для дальнейшей верификации
+		timeDuration - время на подтверждение почты
+	*/
+	h.clientRedis.Set(uuid, []byte(user.Email), h.timeDurRedis)
 
-	/*Асинхронно отправляем письмо,
-	что бы пользователь долго не ждал ответ от свервера*/
+	/*
+		Сразу делаем запись в бд
+		значение поля verify будет false
+	*/
+	ok = storage.AddUser(user.Email, user.Password, h.db, h.log)
+	if !ok {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	/*
+		Асинхронно отправляем письмо,
+		что бы пользователь долго не ждал ответ от свервера
+	*/
 	link = fmt.Sprintf("%s://%s%s%s?token=%s", h.protocol, h.server, h.port, consts.VERIFY, uuid)
-	go h.sender.SendMessage(user.Email, link, h.timeDuration)
+	go h.sender.SendMessage(user.Email, link, h.timeDurRedis)
 
-	h.log.Info("success send code: %s", body)
+	h.log.Info("success send code: %s", uuid)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -112,14 +136,18 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		err           error
 		password_hash string
 	)
-	//получаем информацию от пользователя
+	/*
+		Получаем информацию от пользователя
+	*/
 
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	//получаем body запроса
+	/*
+		Получаем body запроса
+	*/
 	err = json.NewDecoder(r.Body).Decode(&user)
 	r.Body.Close()
 
@@ -130,15 +158,19 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	password_hash = storage.GetUserByEmail(user.Email, user.Password, h.db, h.log)
 	if !security.Compare(user.Password, password_hash) {
-		/*возвращаем 401, что значит, что данные введены неверно
-		никаких уточнений не делаем для защиты,
-		пользователь не должен знать имеется ли такой email в базе или нет*/
+		/*
+			возвращаем 401, что значит, что данные введены неверно
+			никаких уточнений не делаем для защиты,
+			пользователь не должен знать имеется ли такой email в базе или нет
+		*/
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
-	//получаем jwt-токен
-	jwtToken, err = security.CreateToken(user.Email, h.secret)
+	/*
+		Получаем jwt-токен
+	*/
+	jwtToken, err = security.CreateToken(user.Email, h.secret, h.timeDurJWT)
 	if err != nil {
 		h.log.Error("token creation error: ", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
@@ -168,7 +200,9 @@ func (h *AuthHandler) Validate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//убираем префикс "Bearer "
+	/*
+		Убираем префикс "Bearer "
+	*/
 	if len(jwtToken) > 7 && jwtToken[:7] == "Bearer " {
 		jwtToken = jwtToken[7:]
 	} else {
@@ -176,14 +210,18 @@ func (h *AuthHandler) Validate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//валидируем токен
+	/*
+		Валидируем токен
+	*/
 	email, err = security.ValidateToken(jwtToken, h.secret)
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
-	//токен валиден, возвращаем email
+	/*
+		Токен валиден, возвращаем email
+	*/
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{
@@ -194,56 +232,46 @@ func (h *AuthHandler) Validate(w http.ResponseWriter, r *http.Request) {
 
 func (h *AuthHandler) Verify(w http.ResponseWriter, r *http.Request) {
 	var (
-		token    string
-		err      error
-		data     string
-		userByte []byte
-		user     *model.User
-		ok       bool
+		token string
+		err   error
+		email string
 	)
 
-	h.log.Info("VERIFY HANDLER CALLED, URL: ", r.URL.String())
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	//получаем токен
+	/*
+		Получаем токен
+	*/
 	token = r.URL.Query().Get("token")
 	if token == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	//получаем пользователя
-	data, err = h.clientRedis.Get(token)
+	/*
+		Получаем email пользователя
+	*/
+	email, err = h.clientRedis.Get(token)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	//получаем информацию о пользователе
-	userByte = []byte(data)
-	err = json.Unmarshal(userByte, &user)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		h.log.Error("json: ", err.Error())
-		return
-	}
+	/*
+		Верифицируем пользователя
+	*/
+	storage.VerifyUser(email, h.db, h.log)
 
-	//удаляем пользователя
+	/*
+		Удаляем пользователя
+	*/
 	err = h.clientRedis.Del(token)
 	if err != nil {
-
 		w.WriteHeader(http.StatusInternalServerError)
 		h.log.Error("redis del: ", err.Error())
-		return
-	}
-
-	//записываем информацию в бд
-	ok = storage.AddUser(user.Email, user.Password, h.db, h.log)
-	if !ok {
-		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 

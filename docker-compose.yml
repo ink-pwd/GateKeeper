@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  # 1. База данных Postgres
+  postgres-service:
+    image: postgres:15-alpine
+    container_name: gatekeeper_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: gatekeeper
+    ports:
+      - "5432:5432" # Проброс порта наружу для работы с DBeaver/pgAdmin
+    volumes:
+      - pgdata:/var/lib/postgresql/data # Данные не пропадут после перезапуска
+      # Создаем нашу таблицу
+      - ./internal/storage/migration.sql:/docker-entrypoint-initdb.d/migration.sql
+    restart: always
+
+  # 2. База данных Redis
+  redis-service:
+    image: redis:alpine
+    container_name: gatekeeper_redis
+    ports:
+      - "6379:6379" # Проброс порта наружу, если захотите проверить данные руками
+    restart: always
+
+  # 3. Ваше Go API приложение
+  api-service:
+    build: .
+    container_name: gatekeeper_api
+    ports:
+      - "8080:8080" # Открываем порт сервера для вашего браузера
+    # Автоматически прокидываем файл .env внутрь контейнера
+    env_file:
+      - .env
+    # Ждем, пока запустятся обе базы данных
+    depends_on:
+      - postgres-service
+      - redis-service
+    restart: always
+
+# Выделяем место на жестком диске под базу данных
+volumes:
+  pgdata:

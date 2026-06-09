@@ -8,6 +8,7 @@ CREATE TABLE public."User" (
 	id int4 GENERATED ALWAYS AS IDENTITY NOT NULL,
 	email varchar NOT NULL,
 	password_hash varchar NOT NULL,
+    verify boolean DEFAULT false NOT NULL,
 	CONSTRAINT user_pk PRIMARY KEY (id),
 	CONSTRAINT user_unique UNIQUE (email)
 );

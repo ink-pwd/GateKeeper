@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/ink-pwd/Gatekeeper/internal/consts"
 	"github.com/ink-pwd/Gatekeeper/internal/email"
@@ -17,40 +18,65 @@ import (
 )
 
 func main() {
+	/*
+		Это демонстрационный проект создания api
+		для регистрации/подтверждения по email/авторизации/валидации
+
+		в котором происходит:
+		временное хранение данных в redis(ttl = 10 min), отправка сообщений smtp
+		работа с бд(postgresql), шифрование паролей с помощью bcrypt,
+		создание jwt-токена, uuid который используется в качестве ключа верификации по email,
+		автоудаление неверифицированных пользователей.
+
+		Проект полностью контейнеризирован с помощью Docker.
+		Реализована многоконтейнерная оркестрация через Docker Compose!
+	*/
+
 	var (
-		err          error
-		mux          *http.ServeMux
-		log          logger.Logger
-		handl        *handler.AuthHandler
-		server       string
-		port         string
-		protocol     string
-		redisPort    string
-		connStr      string
-		secret       string
-		fromEmail    string
-		password     string
-		hostsmtp     string
-		portsmtp     string
-		time         string
-		timeDuration int
-		sender       *email.Sender
-		db           *sql.DB
-		redClient    *storage.ClientRedis
-		connect      bool
+		err           error
+		mux           *http.ServeMux
+		log           logger.Logger
+		handl         *handler.AuthHandler
+		listenaddr    string
+		server        string
+		redisHost     string
+		port          string
+		protocol      string
+		redisPort     string
+		connStr       string
+		secret        string
+		fromEmail     string
+		password      string
+		hostsmtp      string
+		portsmtp      string
+		timeEnv       string
+		timeDurDelete int
+		timeDurRedis  int
+		timeDurJWT    int
+		ticker        *time.Ticker
+		sender        *email.Sender
+		db            *sql.DB
+		redClient     *storage.ClientRedis
+		connect       bool
 	)
 
-	//инициализация логера
+	/*
+		Инициализация логера
+	*/
 	log = logger.NewStdLogger()
 
-	//загружаем окружение
+	/*
+		Загружаем окружение
+	*/
 	err = godotenv.Load()
 	if err != nil {
 		log.Fatal("environment startup error: ", err.Error())
 		return
 	}
+	listenaddr = os.Getenv("LISTENADDR")
 	server = os.Getenv("SERVER")
 	connStr = os.Getenv("DB")
+	redisHost = os.Getenv("REDISHOST")
 	secret = os.Getenv("SECRET")
 	protocol = os.Getenv("PROTOCOL")
 	port = os.Getenv("PORT")
@@ -59,18 +85,38 @@ func main() {
 	portsmtp = os.Getenv("PORTSMTP")
 	fromEmail = os.Getenv("EMAIL")
 	password = os.Getenv("PASSWORD")
-	time = os.Getenv("TIMEDURATION")
+	timeEnv = os.Getenv("TIMEDURATIONREDIS")
 
-	//превращаем время взятое из окружение в int
-	timeDuration, err = strconv.Atoi(time)
+	/*
+		Превращаем время взятое из окружение в int
+	*/
+	timeDurRedis, err = strconv.Atoi(timeEnv)
 	if err != nil {
-		log.Fatal("specify an integer time duration in .env \n", err.Error())
+		log.Fatal("specify an integer time duration redis in .env \n", err.Error())
 	}
 
-	//создаем структуру для отправки сообщений
+	timeEnv = os.Getenv("TIMEDURATIONDELETE")
+
+	timeDurDelete, err = strconv.Atoi(timeEnv)
+	if err != nil {
+		log.Fatal("specify an integer time duration delete in .env \n", err.Error())
+	}
+
+	timeEnv = os.Getenv("TIMEDURATIONJWT")
+
+	timeDurJWT, err = strconv.Atoi(timeEnv)
+	if err != nil {
+		log.Fatal("specify an integer time duration jwt in .env \n", err.Error())
+	}
+
+	/*
+		Cоздаем структуру для отправки сообщений
+	*/
 	sender = email.NewSender(fromEmail, password, hostsmtp, portsmtp)
 
-	//подключаемся к бд
+	/*
+		Подключаемся к бд
+	*/
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal("error db connect: ", err.Error())
@@ -78,9 +124,11 @@ func main() {
 	}
 	log.Info("success connect to db")
 
-	//подключаемся к redis
+	/*
+		Подключаемся к redis
+	*/
 	redClient = storage.NewClient(redis.NewClient(&redis.Options{
-		Addr:     server + redisPort,
+		Addr:     redisHost + redisPort,
 		Password: "",
 		DB:       0,
 	}))
@@ -91,20 +139,39 @@ func main() {
 	}
 	log.Info("success redis connect %s%s", server, redisPort)
 
-	//инициализация зависимостей
+	/*
+		Инициализация зависимостей
+	*/
 	mux = http.NewServeMux()
-	handl = handler.NewAuthHandler(log, db, redClient, sender, timeDuration, protocol, server, secret, port)
+	handl = handler.NewAuthHandler(log, db, redClient, sender, timeDurRedis, timeDurJWT, protocol, server, secret, port)
 
-	//регистрируем маршруты
+	/*
+		Регистрируем маршруты
+	*/
 	mux.HandleFunc(consts.REGISTER, handl.Register)
 	mux.HandleFunc(consts.LOGIN, handl.Login)
 	mux.HandleFunc(consts.VALIDATE, handl.Validate)
 	mux.HandleFunc(consts.VERIFY, handl.Verify)
-	//запуск сервера
-	err = http.ListenAndServe(server+port, mux)
+
+	/*
+		Запускаем автоудаление не верифицированных пользователей
+		асинхронно, что бы не мешало выполнению основного кода
+	*/
+	go func() {
+		ticker = time.NewTicker(time.Duration(timeDurDelete) * time.Minute)
+		defer ticker.Stop()
+
+		log.Info("remove unverified users")
+		storage.DeleteNonVerify(db, log)
+	}()
+
+	/*
+		Запуск сервера
+	*/
+	err = http.ListenAndServe(listenaddr+port, mux)
 	if err != nil {
 		log.Fatal("the server did not start: ", err.Error())
 		return
 	}
-	log.Info("server has been started at ", server+port)
+	log.Info("server has been started at ", listenaddr+port)
 }

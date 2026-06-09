@@ -27,7 +27,9 @@ func (s *Sender) SendMessage(email, link string, time int) error {
 		err  error
 		addr []string
 	)
-	//формируем массив адресов для отправки(в нашем случае один)
+	/*
+		Формируем массив адресов для отправки(в нашем случае один)
+	*/
 	addr = append(addr, email)
 	auth = smtp.PlainAuth(
 		"",
@@ -36,7 +38,9 @@ func (s *Sender) SendMessage(email, link string, time int) error {
 		s.host,
 	)
 
-	//отправляем письмо
+	/*
+		Отправляем письмо
+	*/
 	err = smtp.SendMail(
 		s.host+s.port,
 		auth,

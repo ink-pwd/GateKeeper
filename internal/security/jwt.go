@@ -6,39 +6,49 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-func CreateToken(email string, secret string) (string, error) {
+func CreateToken(email, secret string, timeDuration int) (string, error) {
 	var (
 		token *jwt.Token
 	)
-	//передаем метод + параметры, которые будут вшиты в jwt
-	//создаем токен на 24 часа(exp)
+	/*
+		Передаем метод + параметры, которые будут вшиты в jwt
+		Создаем токен на 24 часа(exp)
+	*/
 	token = jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"email": email,
-		"exp":   time.Now().Add(24 * time.Hour).Unix(), // +24 часа
+		"exp":   time.Now().Add(time.Duration(timeDuration) * time.Hour).Unix(),
 	})
 
-	//подписываем нашим ключом
+	/*
+		Подписываем нашим ключом
+	*/
 	return token.SignedString([]byte(secret))
 }
 
-func ValidateToken(tokenString string, secret string) (string, error) {
+func ValidateToken(tokenString, secret string) (string, error) {
 	var (
 		token  *jwt.Token
 		err    error
 		claims jwt.MapClaims
 		email  string
 	)
-	//парсим токен, проверяя подпись секрет и exp
+	/*
+		Парсим токен, проверяя подпись секрет и exp
+	*/
 	token, err = jwt.Parse(tokenString, func(t *jwt.Token) (any, error) {
 		return []byte(secret), nil
 	})
 
-	//проверяем валидность токена
+	/*
+		Проверяем валидность токена
+	*/
 	if err != nil || !token.Valid {
 		return "", err
 	}
 
-	//возвращаем email если валидно
+	/*
+		Возвращаем email если валидно
+	*/
 	claims = token.Claims.(jwt.MapClaims)
 	email = claims["email"].(string)
 	return email, nil

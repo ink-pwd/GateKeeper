@@ -33,8 +33,10 @@ func (r *ClientRedis) Ping() bool {
 }
 
 func (r *ClientRedis) Set(uuid string, userJson []byte, minutes int) error {
-	/*записываем данные пользователя, а в качестве ключа используем uuid
-	Время жизни указываем в минутах в env файле*/
+	/*
+		записываем данные пользователя, а в качестве ключа используем uuid
+		Время жизни указываем в минутах в env файле
+	*/
 	var (
 		duration time.Duration
 	)
